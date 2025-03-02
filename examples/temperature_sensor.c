@@ -54,6 +54,28 @@ static int temperature_alarm_callback(const monitor_context_t *context, void *us
     return PHYMUTI_SUCCESS;
 }
 
+/* 特定温度报警回调函数 */
+static int specific_temperature_callback(const monitor_context_t *context, void *user_data) {
+    (void)user_data;
+    
+    if (!context || !context->region) {
+        return PHYMUTI_ERROR_INVALID_PARAM;
+    }
+    
+    device_handle_t device = memory_region_get_device(context->region);
+    if (!device) {
+        return PHYMUTI_ERROR_DEVICE_NOT_FOUND;
+    }
+    
+    const char *device_name = device_get_name(device);
+    uint32_t value = (uint32_t)context->value;
+    float temp = *(float*)&value;
+    
+    printf("特定温度报警: 设备 %s 的温度达到了 %.1f°C\n", device_name, temp);
+    
+    return PHYMUTI_SUCCESS;
+}
+
 /* 温度传感器创建函数 */
 static int temp_sensor_create(device_handle_t device, const char *name, const device_config_t *config) {
     (void)name;
@@ -260,9 +282,20 @@ int main(void) {
     
     /* 添加监视点 */
     monitor_id_t wp_id = monitor_add_watchpoint(region, TEMP_SENSOR_REG_CURRENT, 
-                                              sizeof(uint32_t), WATCHPOINT_WRITE);
+                                              sizeof(uint32_t), WATCHPOINT_WRITE, 0);
     if (wp_id == MONITOR_INVALID_ID) {
         fprintf(stderr, "添加监视点失败\n");
+        phymuti_cleanup();
+        return 1;
+    }
+    
+    /* 添加特定值监视点（监视温度为35.0度的写入） */
+    float specific_temp = 35.0f;
+    uint32_t specific_temp_value = *(uint32_t*)&specific_temp;
+    monitor_id_t value_wp_id = monitor_add_watchpoint(region, TEMP_SENSOR_REG_CURRENT, 
+                                                    sizeof(uint32_t), WATCHPOINT_VALUE_WRITE, specific_temp_value);
+    if (value_wp_id == MONITOR_INVALID_ID) {
+        fprintf(stderr, "添加特定值监视点失败\n");
         phymuti_cleanup();
         return 1;
     }
@@ -279,6 +312,22 @@ int main(void) {
     ret = monitor_bind_action(wp_id, action_id);
     if (ret != PHYMUTI_SUCCESS) {
         fprintf(stderr, "绑定动作到监视点失败: %s\n", phymuti_error_string(ret));
+        phymuti_cleanup();
+        return 1;
+    }
+    
+    /* 创建特定温度报警动作 */
+    action_id_t specific_action_id = action_create_callback(specific_temperature_callback, NULL);
+    if (specific_action_id == ACTION_INVALID_ID) {
+        fprintf(stderr, "创建特定温度报警动作失败\n");
+        phymuti_cleanup();
+        return 1;
+    }
+    
+    /* 绑定动作到特定值监视点 */
+    ret = monitor_bind_action(value_wp_id, specific_action_id);
+    if (ret != PHYMUTI_SUCCESS) {
+        fprintf(stderr, "绑定动作到特定值监视点失败: %s\n", phymuti_error_string(ret));
         phymuti_cleanup();
         return 1;
     }

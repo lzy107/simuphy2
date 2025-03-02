@@ -91,6 +91,27 @@ static int test_watchpoint_callback(const monitor_context_t *context, void *user
     return PHYMUTI_SUCCESS;
 }
 
+/* 特定值监视点回调函数 */
+static int value_watchpoint_callback(const monitor_context_t *context, void *user_data) {
+    (void)user_data;
+    
+    if (!context || !context->region) {
+        return PHYMUTI_ERROR_INVALID_PARAM;
+    }
+    
+    device_handle_t device = memory_region_get_device(context->region);
+    if (!device) {
+        return PHYMUTI_ERROR_DEVICE_NOT_FOUND;
+    }
+    
+    const char *device_name = device_get_name(device);
+    uint32_t value = (uint32_t)context->value;
+    
+    printf("特定值监视点触发: 设备 %s 的值等于 %u\n", device_name, value);
+    
+    return PHYMUTI_SUCCESS;
+}
+
 /* 测试规则条件函数 */
 static bool test_rule_condition(const monitor_context_t *context, void *user_data) {
     (void)user_data;
@@ -143,9 +164,33 @@ int main(void) {
     }
     
     /* 添加监视点 */
-    monitor_id_t wp_id = monitor_add_watchpoint(region, 0x1000, 4, WATCHPOINT_WRITE);
+    monitor_id_t wp_id = monitor_add_watchpoint(region, 0x1000, 4, WATCHPOINT_WRITE, 0);
     if (wp_id == MONITOR_INVALID_ID) {
         fprintf(stderr, "添加监视点失败\n");
+        phymuti_cleanup();
+        return 1;
+    }
+    
+    /* 添加特定值监视点（监视值为20的写入） */
+    monitor_id_t value_wp_id = monitor_add_watchpoint(region, 0x1000, 4, WATCHPOINT_VALUE_WRITE, 20);
+    if (value_wp_id == MONITOR_INVALID_ID) {
+        fprintf(stderr, "添加特定值监视点失败\n");
+        phymuti_cleanup();
+        return 1;
+    }
+    
+    /* 创建特定值监视点动作 */
+    action_id_t value_action_id = action_create_callback(value_watchpoint_callback, NULL);
+    if (value_action_id == ACTION_INVALID_ID) {
+        fprintf(stderr, "创建特定值监视点动作失败\n");
+        phymuti_cleanup();
+        return 1;
+    }
+    
+    /* 绑定动作到特定值监视点 */
+    ret = monitor_bind_action(value_wp_id, value_action_id);
+    if (ret != PHYMUTI_SUCCESS) {
+        fprintf(stderr, "绑定动作到特定值监视点失败: %s\n", phymuti_error_string(ret));
         phymuti_cleanup();
         return 1;
     }

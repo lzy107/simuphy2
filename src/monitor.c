@@ -18,6 +18,7 @@ typedef struct watchpoint_struct {
     uint32_t size;                /* 大小 */
     watchpoint_type_t type;       /* 类型 */
     bool enabled;                 /* 是否启用 */
+    uint64_t wpvalue;             /* 要监视的值 */
     uint32_t *action_ids;         /* 动作ID数组 */
     uint32_t action_count;        /* 动作数量 */
     uint32_t action_capacity;     /* 动作容量 */
@@ -98,12 +99,14 @@ static watchpoint_t* find_watchpoint(monitor_id_t id) {
  * @param addr 地址
  * @param size 大小（字节）
  * @param type 监视点类型
+ * @param wpvalue 要监视的值（仅当type为WATCHPOINT_VALUE_WRITE时使用）
  * @return monitor_id_t 成功返回监视点ID，失败返回MONITOR_INVALID_ID
  */
 monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr, 
-                                   uint32_t size, watchpoint_type_t type) {
+                                   uint32_t size, watchpoint_type_t type, uint64_t wpvalue) {
     if (!region || size == 0 || 
-        (type != WATCHPOINT_READ && type != WATCHPOINT_WRITE && type != WATCHPOINT_ACCESS)) {
+        (type != WATCHPOINT_READ && type != WATCHPOINT_WRITE && 
+         type != WATCHPOINT_ACCESS && type != WATCHPOINT_VALUE_WRITE)) {
         return MONITOR_INVALID_ID;
     }
     
@@ -120,6 +123,7 @@ monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr,
     wp->size = size;
     wp->type = type;
     wp->enabled = true;
+    wp->wpvalue = wpvalue;  /* 设置要监视的值 */
     wp->action_ids = NULL;
     wp->action_count = 0;
     wp->action_capacity = 0;
@@ -365,6 +369,11 @@ int monitor_notify_memory_access(memory_region_t *region, uint64_t addr,
             case WATCHPOINT_ACCESS:
                 match = (access_type == MEMORY_ACCESS_READ || 
                          access_type == MEMORY_ACCESS_WRITE);
+                break;
+                
+            case WATCHPOINT_VALUE_WRITE:
+                /* 只有在写入操作且值等于wpvalue时才匹配 */
+                match = (access_type == MEMORY_ACCESS_WRITE && value == wp->wpvalue);
                 break;
         }
         

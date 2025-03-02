@@ -67,7 +67,10 @@ int main() {
     memory_write_word(region, 0x1000, 25);
     
     // 添加监视点
-    monitor_id_t wp_id = monitor_add_watchpoint(region, 0x1000, 2, WATCHPOINT_WRITE);
+    monitor_id_t wp_id = monitor_add_watchpoint(region, 0x1000, 2, WATCHPOINT_WRITE, 0);
+    
+    // 添加特定值监视点（监视写入值为30的操作）
+    monitor_id_t value_wp_id = monitor_add_watchpoint(region, 0x1000, 2, WATCHPOINT_VALUE_WRITE, 30);
     
     // 创建动作
     action_id_t action_id = action_create_callback(temperature_alarm_callback, NULL);

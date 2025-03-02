@@ -22,6 +22,7 @@ typedef enum {
     WATCHPOINT_READ = 1,    /* 读监视点 */
     WATCHPOINT_WRITE = 2,   /* 写监视点 */
     WATCHPOINT_ACCESS = 3,  /* 访问监视点（读或写） */
+    WATCHPOINT_VALUE_WRITE = 4, /* 特定值写入监视点 */
 } watchpoint_type_t;
 
 /* 监视点上下文 */
@@ -54,10 +55,11 @@ int monitor_cleanup(void);
  * @param addr 地址
  * @param size 大小（字节）
  * @param type 监视点类型
+ * @param wpvalue 要监视的值（仅当type为WATCHPOINT_VALUE_WRITE时使用）
  * @return monitor_id_t 成功返回监视点ID，失败返回MONITOR_INVALID_ID
  */
 monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr, 
-                                   uint32_t size, watchpoint_type_t type);
+                                   uint32_t size, watchpoint_type_t type, uint64_t wpvalue);
 
 /**
  * @brief 删除监视点
