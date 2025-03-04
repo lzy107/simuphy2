@@ -33,7 +33,8 @@ static watchpoint_t *watchpoint_list = NULL;
 static monitor_id_t next_watchpoint_id = 1;
 
 /* 监视点链表的互斥锁 */
-static pthread_mutex_t watchpoint_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t watchpoint_mutex;
+static pthread_mutexattr_t watchpoint_mutex_attr;
 
 /**
  * @brief 初始化监视器
@@ -41,6 +42,26 @@ static pthread_mutex_t watchpoint_mutex = PTHREAD_MUTEX_INITIALIZER;
  * @return int 成功返回0，失败返回错误码
  */
 int monitor_init(void) {
+    int ret;
+    
+    /* 初始化互斥锁为递归锁 */
+    ret = pthread_mutexattr_init(&watchpoint_mutex_attr);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_INIT_FAILED;
+    }
+    
+    ret = pthread_mutexattr_settype(&watchpoint_mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    if (ret != 0) {
+        pthread_mutexattr_destroy(&watchpoint_mutex_attr);
+        return PHYMUTI_ERROR_MUTEX_INIT_FAILED;
+    }
+    
+    ret = pthread_mutex_init(&watchpoint_mutex, &watchpoint_mutex_attr);
+    if (ret != 0) {
+        pthread_mutexattr_destroy(&watchpoint_mutex_attr);
+        return PHYMUTI_ERROR_MUTEX_INIT_FAILED;
+    }
+    
     /* 初始化监视点链表 */
     watchpoint_list = NULL;
     next_watchpoint_id = 1;
@@ -54,8 +75,13 @@ int monitor_init(void) {
  * @return int 成功返回0，失败返回错误码
  */
 int monitor_cleanup(void) {
+    int ret;
+    
     /* 清理所有监视点 */
-    pthread_mutex_lock(&watchpoint_mutex);
+    ret = pthread_mutex_lock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
     
     watchpoint_t *wp = watchpoint_list;
     watchpoint_t *next_wp;
@@ -77,13 +103,27 @@ int monitor_cleanup(void) {
     watchpoint_list = NULL;
     next_watchpoint_id = 1;
     
-    pthread_mutex_unlock(&watchpoint_mutex);
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
+    
+    /* 销毁互斥锁 */
+    ret = pthread_mutex_destroy(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_DESTROY_FAILED;
+    }
+    
+    ret = pthread_mutexattr_destroy(&watchpoint_mutex_attr);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_DESTROY_FAILED;
+    }
     
     return PHYMUTI_SUCCESS;
 }
 
 /**
- * @brief 查找监视点
+ * @brief 查找监视点（不会释放锁，调用者必须释放锁）
  * 
  * @param id 监视点ID
  * @return watchpoint_t* 成功返回监视点指针，失败返回NULL
@@ -92,20 +132,43 @@ static watchpoint_t* find_watchpoint(monitor_id_t id) {
     watchpoint_t *wp;
     
     /* 遍历监视点链表 */
-    pthread_mutex_lock(&watchpoint_mutex);
-    
     wp = watchpoint_list;
     while (wp) {
         if (wp->id == id) {
-            pthread_mutex_unlock(&watchpoint_mutex);
             return wp;
         }
         
         wp = wp->next;
     }
     
-    pthread_mutex_unlock(&watchpoint_mutex);
     return NULL;
+}
+
+/**
+ * @brief 查找监视点（内部加锁版本）
+ * 
+ * @param id 监视点ID
+ * @return watchpoint_t* 成功返回监视点指针，失败返回NULL
+ */
+static watchpoint_t* find_watchpoint_locked(monitor_id_t id) {
+    int ret;
+    
+    ret = pthread_mutex_lock(&watchpoint_mutex);
+    if (ret != 0) {
+        /* 锁获取失败，无法访问共享数据 */
+        return NULL;
+    }
+    
+    watchpoint_t *wp = find_watchpoint(id);
+    if (!wp) {
+        ret = pthread_mutex_unlock(&watchpoint_mutex);
+        if (ret != 0) {
+            /* 锁释放失败，但已经确定没有找到监视点 */
+            /* 在实际应用中可以考虑记录错误日志 */
+        }
+    }
+    
+    return wp;
 }
 
 /**
@@ -122,6 +185,7 @@ monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr,
                                    uint32_t size, watchpoint_type_t type, uint64_t wpvalue) {
     watchpoint_t *wp;
     monitor_id_t id;
+    int ret;
     
     /* 检查参数 */
     if (!region || size == 0 || size > 8) {
@@ -135,7 +199,12 @@ monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr,
     }
     
     /* 初始化监视点 */
-    pthread_mutex_lock(&watchpoint_mutex);
+    ret = pthread_mutex_lock(&watchpoint_mutex);
+    if (ret != 0) {
+        /* 锁获取失败，释放已分配的资源 */
+        free(wp);
+        return 0;
+    }
     
     id = next_watchpoint_id++;
     wp->id = id;
@@ -153,7 +222,12 @@ monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr,
     wp->next = watchpoint_list;
     watchpoint_list = wp;
     
-    pthread_mutex_unlock(&watchpoint_mutex);
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，但监视点已创建，
+           记录错误但返回创建的ID */
+        /* 在实际应用中可以考虑记录错误日志 */
+    }
     
     return id;
 }
@@ -165,11 +239,18 @@ monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr,
  * @return int 成功返回0，失败返回错误码
  */
 int monitor_remove_watchpoint(monitor_id_t id) {
+    int ret;
+    
     if (id == MONITOR_INVALID_ID) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
     /* 查找监视点 */
+    ret = pthread_mutex_lock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
+    
     watchpoint_t *prev = NULL;
     watchpoint_t *wp = watchpoint_list;
     
@@ -190,11 +271,21 @@ int monitor_remove_watchpoint(monitor_id_t id) {
             /* 释放监视点 */
             free(wp);
             
+            ret = pthread_mutex_unlock(&watchpoint_mutex);
+            if (ret != 0) {
+                return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+            }
+            
             return PHYMUTI_SUCCESS;
         }
         
         prev = wp;
         wp = wp->next;
+    }
+    
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
     }
     
     return PHYMUTI_ERROR_WATCHPOINT_NOT_FOUND;
@@ -207,13 +298,21 @@ int monitor_remove_watchpoint(monitor_id_t id) {
  * @return int 成功返回0，失败返回错误码
  */
 int monitor_enable_watchpoint(monitor_id_t id) {
+    int ret;
+    
     /* 查找监视点 */
-    watchpoint_t *wp = find_watchpoint(id);
+    watchpoint_t *wp = find_watchpoint_locked(id);
     if (!wp) {
         return PHYMUTI_ERROR_WATCHPOINT_NOT_FOUND;
     }
     
     wp->enabled = true;
+    
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
+    
     return PHYMUTI_SUCCESS;
 }
 
@@ -224,13 +323,21 @@ int monitor_enable_watchpoint(monitor_id_t id) {
  * @return int 成功返回0，失败返回错误码
  */
 int monitor_disable_watchpoint(monitor_id_t id) {
+    int ret;
+    
     /* 查找监视点 */
-    watchpoint_t *wp = find_watchpoint(id);
+    watchpoint_t *wp = find_watchpoint_locked(id);
     if (!wp) {
         return PHYMUTI_ERROR_WATCHPOINT_NOT_FOUND;
     }
     
     wp->enabled = false;
+    
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
+    
     return PHYMUTI_SUCCESS;
 }
 
@@ -242,8 +349,10 @@ int monitor_disable_watchpoint(monitor_id_t id) {
  * @return int 成功返回0，失败返回错误码
  */
 int monitor_bind_action(monitor_id_t id, uint32_t action_id) {
+    int ret;
+    
     /* 查找监视点 */
-    watchpoint_t *wp = find_watchpoint(id);
+    watchpoint_t *wp = find_watchpoint_locked(id);
     if (!wp) {
         return PHYMUTI_ERROR_WATCHPOINT_NOT_FOUND;
     }
@@ -251,6 +360,10 @@ int monitor_bind_action(monitor_id_t id, uint32_t action_id) {
     /* 检查动作是否已绑定 */
     for (uint32_t i = 0; i < wp->action_count; i++) {
         if (wp->action_ids[i] == action_id) {
+            ret = pthread_mutex_unlock(&watchpoint_mutex);
+            if (ret != 0) {
+                return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+            }
             return PHYMUTI_SUCCESS;  /* 已绑定 */
         }
     }
@@ -260,6 +373,11 @@ int monitor_bind_action(monitor_id_t id, uint32_t action_id) {
         uint32_t new_capacity = wp->action_capacity == 0 ? 4 : wp->action_capacity * 2;
         uint32_t *new_action_ids = (uint32_t *)realloc(wp->action_ids, new_capacity * sizeof(uint32_t));
         if (!new_action_ids) {
+            ret = pthread_mutex_unlock(&watchpoint_mutex);
+            if (ret != 0) {
+                /* 锁释放失败，但内存分配已经失败 */
+                /* 在实际应用中可以考虑记录错误日志 */
+            }
             return PHYMUTI_ERROR_OUT_OF_MEMORY;
         }
         
@@ -269,6 +387,11 @@ int monitor_bind_action(monitor_id_t id, uint32_t action_id) {
     
     /* 添加动作ID */
     wp->action_ids[wp->action_count++] = action_id;
+    
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
     
     return PHYMUTI_SUCCESS;
 }
@@ -281,8 +404,10 @@ int monitor_bind_action(monitor_id_t id, uint32_t action_id) {
  * @return int 成功返回0，失败返回错误码
  */
 int monitor_unbind_action(monitor_id_t id, uint32_t action_id) {
+    int ret;
+    
     /* 查找监视点 */
-    watchpoint_t *wp = find_watchpoint(id);
+    watchpoint_t *wp = find_watchpoint_locked(id);
     if (!wp) {
         return PHYMUTI_ERROR_WATCHPOINT_NOT_FOUND;
     }
@@ -297,8 +422,18 @@ int monitor_unbind_action(monitor_id_t id, uint32_t action_id) {
             }
             wp->action_count--;
             
+            ret = pthread_mutex_unlock(&watchpoint_mutex);
+            if (ret != 0) {
+                return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+            }
+            
             return PHYMUTI_SUCCESS;
         }
+    }
+    
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
     }
     
     return PHYMUTI_ERROR_NOT_FOUND;
@@ -316,8 +451,10 @@ int monitor_unbind_action(monitor_id_t id, uint32_t action_id) {
  */
 int monitor_get_watchpoint_info(monitor_id_t id, memory_region_t **region, 
                                uint64_t *addr, uint32_t *size, watchpoint_type_t *type) {
+    int ret;
+    
     /* 查找监视点 */
-    watchpoint_t *wp = find_watchpoint(id);
+    watchpoint_t *wp = find_watchpoint_locked(id);
     if (!wp) {
         return PHYMUTI_ERROR_WATCHPOINT_NOT_FOUND;
     }
@@ -336,6 +473,11 @@ int monitor_get_watchpoint_info(monitor_id_t id, memory_region_t **region,
         *type = wp->type;
     }
     
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
+    
     return PHYMUTI_SUCCESS;
 }
 
@@ -352,12 +494,27 @@ int monitor_get_watchpoint_info(monitor_id_t id, memory_region_t **region,
 int monitor_notify_memory_access(memory_region_t *region, uint64_t addr, 
                                 uint32_t size, uint64_t value, 
                                 memory_access_type_t access_type) {
+    int ret;
+    
     if (!region) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
     /* 遍历所有监视点 */
+    ret = pthread_mutex_lock(&watchpoint_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
+    
     watchpoint_t *wp = watchpoint_list;
+    
+    /* 收集需要执行的动作，避免在持有锁时调用外部函数 */
+    #define MAX_MATCHES 32
+    struct {
+        uint32_t action_id;
+        monitor_context_t context;
+    } matched_actions[MAX_MATCHES];
+    int match_count = 0;
     
     while (wp) {
         /* 检查监视点是否启用 */
@@ -413,12 +570,25 @@ int monitor_notify_memory_access(memory_region_t *region, uint64_t addr,
         context.value = value;
         context.access_type = access_type;
         
-        /* 执行所有绑定的动作 */
-        for (uint32_t i = 0; i < wp->action_count; i++) {
-            action_execute(wp->action_ids[i], &context);
+        /* 添加所有绑定的动作到待执行列表 */
+        for (uint32_t i = 0; i < wp->action_count && match_count < MAX_MATCHES; i++) {
+            matched_actions[match_count].action_id = wp->action_ids[i];
+            matched_actions[match_count].context = context;
+            match_count++;
         }
         
         wp = wp->next;
+    }
+    
+    ret = pthread_mutex_unlock(&watchpoint_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，但仍需要执行匹配的动作 */
+        /* 在实际应用中可以考虑记录错误日志 */
+    }
+    
+    /* 执行所有匹配的动作 */
+    for (int i = 0; i < match_count; i++) {
+        action_execute(matched_actions[i].action_id, &matched_actions[i].context);
     }
     
     return PHYMUTI_SUCCESS;

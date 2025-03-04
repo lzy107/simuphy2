@@ -18,6 +18,10 @@
 #define PHYMUTI_ERROR_BUSY            -8   /* 忙 */
 #define PHYMUTI_ERROR_IO              -9   /* IO错误 */
 #define PHYMUTI_ERROR_INTERNAL        -10  /* 内部错误 */
+#define PHYMUTI_ERROR_MUTEX_INIT_FAILED    -11  /* 互斥锁初始化失败 */
+#define PHYMUTI_ERROR_MUTEX_DESTROY_FAILED -12  /* 互斥锁销毁失败 */
+#define PHYMUTI_ERROR_MUTEX_LOCK_FAILED    -13  /* 互斥锁加锁失败 */
+#define PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED  -14  /* 互斥锁解锁失败 */
 
 /* 设备管理器错误码 */
 #define PHYMUTI_ERROR_DEVICE_TYPE_NOT_FOUND    -100  /* 设备类型未找到 */

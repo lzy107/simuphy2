@@ -32,8 +32,9 @@ static device_type_t *device_type_list = NULL;
 /* 设备链表头 */
 static device_handle_t device_list = NULL;
 
-/* 设备和设备类型链表的互斥锁 */
-static pthread_mutex_t device_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* 设备和设备类型链表的递归互斥锁 */
+static pthread_mutex_t device_mutex;
+static pthread_mutexattr_t device_mutex_attr;
 
 /**
  * @brief 初始化设备管理器
@@ -41,6 +42,26 @@ static pthread_mutex_t device_mutex = PTHREAD_MUTEX_INITIALIZER;
  * @return int 成功返回0，失败返回错误码
  */
 int device_manager_init(void) {
+    int ret;
+    
+    /* 初始化递归互斥锁 */
+    ret = pthread_mutexattr_init(&device_mutex_attr);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_INIT_FAILED;
+    }
+    
+    ret = pthread_mutexattr_settype(&device_mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    if (ret != 0) {
+        pthread_mutexattr_destroy(&device_mutex_attr);
+        return PHYMUTI_ERROR_MUTEX_INIT_FAILED;
+    }
+    
+    ret = pthread_mutex_init(&device_mutex, &device_mutex_attr);
+    if (ret != 0) {
+        pthread_mutexattr_destroy(&device_mutex_attr);
+        return PHYMUTI_ERROR_MUTEX_INIT_FAILED;
+    }
+    
     /* 初始化设备类型链表和设备链表 */
     device_type_list = NULL;
     device_list = NULL;
@@ -56,9 +77,13 @@ int device_manager_init(void) {
 int device_manager_cleanup(void) {
     device_type_t *type, *next_type;
     device_handle_t device, next_device;
+    int ret;
     
     /* 清理所有设备 */
-    pthread_mutex_lock(&device_mutex);
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
     
     device = device_list;
     while (device) {
@@ -94,7 +119,21 @@ int device_manager_cleanup(void) {
     device_list = NULL;
     device_type_list = NULL;
     
-    pthread_mutex_unlock(&device_mutex);
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
+    
+    /* 销毁互斥锁 */
+    ret = pthread_mutex_destroy(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_DESTROY_FAILED;
+    }
+    
+    ret = pthread_mutexattr_destroy(&device_mutex_attr);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_DESTROY_FAILED;
+    }
     
     return PHYMUTI_SUCCESS;
 }
@@ -109,6 +148,7 @@ int device_manager_cleanup(void) {
  */
 int device_type_register(const char *type_name, const device_ops_t *ops, void *user_data) {
     device_type_t *type;
+    int ret;
     
     /* 检查参数 */
     if (!type_name || !ops) {
@@ -116,12 +156,18 @@ int device_type_register(const char *type_name, const device_ops_t *ops, void *u
     }
     
     /* 检查是否已注册 */
-    pthread_mutex_lock(&device_mutex);
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
     
     type = device_type_list;
     while (type) {
         if (strcmp(type->name, type_name) == 0) {
-            pthread_mutex_unlock(&device_mutex);
+            ret = pthread_mutex_unlock(&device_mutex);
+            if (ret != 0) {
+                return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+            }
             return PHYMUTI_ERROR_ALREADY_EXISTS;
         }
         type = type->next;
@@ -130,14 +176,20 @@ int device_type_register(const char *type_name, const device_ops_t *ops, void *u
     /* 创建新的设备类型 */
     type = (device_type_t *)malloc(sizeof(device_type_t));
     if (!type) {
-        pthread_mutex_unlock(&device_mutex);
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
         return PHYMUTI_ERROR_OUT_OF_MEMORY;
     }
     
     type->name = strdup(type_name);
     if (!type->name) {
         free(type);
-        pthread_mutex_unlock(&device_mutex);
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
         return PHYMUTI_ERROR_OUT_OF_MEMORY;
     }
     
@@ -148,7 +200,10 @@ int device_type_register(const char *type_name, const device_ops_t *ops, void *u
     type->next = device_type_list;
     device_type_list = type;
     
-    pthread_mutex_unlock(&device_mutex);
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
     
     return PHYMUTI_SUCCESS;
 }
@@ -160,8 +215,15 @@ int device_type_register(const char *type_name, const device_ops_t *ops, void *u
  * @return int 成功返回0，失败返回错误码
  */
 int device_type_unregister(const char *type_name) {
+    int ret;
+    
     if (!type_name) {
         return PHYMUTI_ERROR_INVALID_PARAM;
+    }
+    
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
     }
     
     device_type_t *prev = NULL;
@@ -174,6 +236,10 @@ int device_type_unregister(const char *type_name) {
             device_handle_t device = device_list;
             while (device) {
                 if (device->type == type) {
+                    ret = pthread_mutex_unlock(&device_mutex);
+                    if (ret != 0) {
+                        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+                    }
                     return PHYMUTI_ERROR_BUSY;  /* 有设备实例，不能注销 */
                 }
                 device = device->next;
@@ -190,6 +256,10 @@ int device_type_unregister(const char *type_name) {
             free(type->name);
             free(type);
             
+            ret = pthread_mutex_unlock(&device_mutex);
+            if (ret != 0) {
+                return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+            }
             return PHYMUTI_SUCCESS;
         }
         
@@ -197,7 +267,30 @@ int device_type_unregister(const char *type_name) {
         type = type->next;
     }
     
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
     return PHYMUTI_ERROR_DEVICE_TYPE_NOT_FOUND;
+}
+
+/**
+ * @brief 查找设备类型（不解锁版本，供内部使用）
+ * 
+ * @param type_name 设备类型名称
+ * @return device_type_t* 成功返回设备类型指针，失败返回NULL
+ */
+static device_type_t* find_device_type_locked(const char *type_name) {
+    device_type_t *type = device_type_list;
+    
+    while (type) {
+        if (strcmp(type->name, type_name) == 0) {
+            return type;
+        }
+        type = type->next;
+    }
+    
+    return NULL;
 }
 
 /**
@@ -207,13 +300,40 @@ int device_type_unregister(const char *type_name) {
  * @return device_type_t* 成功返回设备类型指针，失败返回NULL
  */
 static device_type_t* find_device_type(const char *type_name) {
-    device_type_t *type = device_type_list;
+    device_type_t *type;
+    int ret;
     
-    while (type) {
-        if (strcmp(type->name, type_name) == 0) {
-            return type;
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        /* 无法处理错误，直接返回NULL */
+        return NULL;
+    }
+    
+    type = find_device_type_locked(type_name);
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，记录错误或日志 */
+        /* 这里我们无法返回错误码，仅返回找到的结果 */
+    }
+    
+    return type;
+}
+
+/**
+ * @brief 查找设备（不解锁版本，供内部使用）
+ * 
+ * @param name 设备名称
+ * @return device_handle_t 成功返回设备句柄，失败返回NULL
+ */
+static device_handle_t find_device_by_name_locked(const char *name) {
+    device_handle_t device = device_list;
+    
+    while (device) {
+        if (strcmp(device->name, name) == 0) {
+            return device;
         }
-        type = type->next;
+        device = device->next;
     }
     
     return NULL;
@@ -228,34 +348,42 @@ static device_type_t* find_device_type(const char *type_name) {
  * @return device_handle_t 成功返回设备句柄，失败返回NULL
  */
 device_handle_t device_create(const char *type_name, const char *name, const device_config_t *config) {
+    int ret;
+    
     if (!type_name || !name) {
         return NULL;
     }
     
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return NULL;
+    }
+    
     /* 查找设备类型 */
-    device_type_t *type = find_device_type(type_name);
+    device_type_t *type = find_device_type_locked(type_name);
     if (!type) {
+        pthread_mutex_unlock(&device_mutex);
         return NULL;
     }
     
     /* 检查设备名称是否已存在 */
-    device_handle_t device = device_list;
-    while (device) {
-        if (strcmp(device->name, name) == 0) {
-            return NULL;  /* 设备名称已存在 */
-        }
-        device = device->next;
+    device_handle_t existing_device = find_device_by_name_locked(name);
+    if (existing_device) {
+        pthread_mutex_unlock(&device_mutex);
+        return NULL;  /* 设备名称已存在 */
     }
     
     /* 创建新的设备实例 */
-    device = (device_handle_t)malloc(sizeof(struct device_struct));
+    device_handle_t device = (device_handle_t)malloc(sizeof(struct device_struct));
     if (!device) {
+        pthread_mutex_unlock(&device_mutex);
         return NULL;
     }
     
     device->name = strdup(name);
     if (!device->name) {
         free(device);
+        pthread_mutex_unlock(&device_mutex);
         return NULL;
     }
     
@@ -264,10 +392,31 @@ device_handle_t device_create(const char *type_name, const char *name, const dev
     
     /* 调用设备类型的create函数 */
     if (type->ops.create) {
-        int ret = type->ops.create(device, name, config);
-        if (ret != PHYMUTI_SUCCESS) {
+        /* 临时解锁以避免在回调中发生死锁 */
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
             free(device->name);
             free(device);
+            return NULL;
+        }
+        
+        int create_ret = type->ops.create(device, name, config);
+        
+        ret = pthread_mutex_lock(&device_mutex);
+        if (ret != 0) {
+            /* 锁失败，需要清理资源 */
+            if (create_ret == PHYMUTI_SUCCESS && type->ops.destroy) {
+                type->ops.destroy(device);
+            }
+            free(device->name);
+            free(device);
+            return NULL;
+        }
+        
+        if (create_ret != PHYMUTI_SUCCESS) {
+            free(device->name);
+            free(device);
+            pthread_mutex_unlock(&device_mutex);
             return NULL;
         }
     }
@@ -275,6 +424,12 @@ device_handle_t device_create(const char *type_name, const char *name, const dev
     /* 添加到设备链表 */
     device->next = device_list;
     device_list = device;
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，但设备已创建成功，这里直接返回设备 */
+        /* 在实际应用中可以考虑记录错误日志 */
+    }
     
     return device;
 }
@@ -286,8 +441,15 @@ device_handle_t device_create(const char *type_name, const char *name, const dev
  * @return int 成功返回0，失败返回错误码
  */
 int device_destroy(device_handle_t device) {
+    int ret;
+    
     if (!device) {
         return PHYMUTI_ERROR_INVALID_PARAM;
+    }
+    
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
     }
     
     /* 从链表中移除 */
@@ -304,18 +466,45 @@ int device_destroy(device_handle_t device) {
             
             /* 调用设备类型的destroy函数 */
             if (device->type && device->type->ops.destroy) {
+                /* 临时解锁以避免在回调中发生死锁 */
+                ret = pthread_mutex_unlock(&device_mutex);
+                if (ret != 0) {
+                    /* 锁释放失败，但仍需要继续销毁设备 */
+                    /* 记录错误日志 */
+                }
+                
                 device->type->ops.destroy(device);
+                
+                ret = pthread_mutex_lock(&device_mutex);
+                if (ret != 0) {
+                    /* 锁获取失败，设备已被销毁但无法更新链表状态 */
+                    /* 这是一个严重的错误，可能导致内存泄漏或状态不一致 */
+                    /* 在实际应用中应该记录错误日志 */
+                    free(device->name);
+                    free(device);
+                    return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+                }
             }
             
             /* 释放资源 */
             free(device->name);
             free(device);
             
+            ret = pthread_mutex_unlock(&device_mutex);
+            if (ret != 0) {
+                return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+            }
+            
             return PHYMUTI_SUCCESS;
         }
         
         prev = curr;
         curr = curr->next;
+    }
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
     }
     
     return PHYMUTI_ERROR_DEVICE_NOT_FOUND;
@@ -328,20 +517,27 @@ int device_destroy(device_handle_t device) {
  * @return device_handle_t 成功返回设备句柄，失败返回NULL
  */
 device_handle_t device_find_by_name(const char *name) {
+    device_handle_t device;
+    int ret;
+    
     if (!name) {
         return NULL;
     }
     
-    device_handle_t device = device_list;
-    
-    while (device) {
-        if (strcmp(device->name, name) == 0) {
-            return device;
-        }
-        device = device->next;
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return NULL;
     }
     
-    return NULL;
+    device = find_device_by_name_locked(name);
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，记录错误或日志 */
+        /* 这里我们无法返回错误码，仅返回找到的结果 */
+    }
+    
+    return device;
 }
 
 /**
@@ -351,12 +547,43 @@ device_handle_t device_find_by_name(const char *name) {
  * @return int 成功返回0，失败返回错误码
  */
 int device_reset(device_handle_t device) {
+    int ret;
+    
     if (!device) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
+    
     if (device->type && device->type->ops.reset) {
-        return device->type->ops.reset(device);
+        /* 临时解锁以避免在回调中发生死锁 */
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
+        
+        int reset_ret = device->type->ops.reset(device);
+        
+        ret = pthread_mutex_lock(&device_mutex);
+        if (ret != 0) {
+            /* 锁获取失败，但设备重置操作已完成 */
+            return reset_ret; /* 返回重置结果 */
+        }
+        
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
+        
+        return reset_ret;
+    }
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
     }
     
     return PHYMUTI_SUCCESS;
@@ -371,12 +598,43 @@ int device_reset(device_handle_t device) {
  * @return int 成功返回0，失败返回错误码
  */
 int device_save_state(device_handle_t device, void *buffer, size_t *size) {
+    int ret;
+    
     if (!device || !size) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
+    
     if (device->type && device->type->ops.save_state) {
-        return device->type->ops.save_state(device, buffer, size);
+        /* 临时解锁以避免在回调中发生死锁 */
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
+        
+        int save_ret = device->type->ops.save_state(device, buffer, size);
+        
+        ret = pthread_mutex_lock(&device_mutex);
+        if (ret != 0) {
+            /* 锁获取失败，但保存状态操作已完成 */
+            return save_ret; /* 返回保存结果 */
+        }
+        
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
+        
+        return save_ret;
+    }
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
     }
     
     return PHYMUTI_ERROR_NOT_SUPPORTED;
@@ -391,12 +649,43 @@ int device_save_state(device_handle_t device, void *buffer, size_t *size) {
  * @return int 成功返回0，失败返回错误码
  */
 int device_load_state(device_handle_t device, const void *buffer, size_t size) {
+    int ret;
+    
     if (!device || !buffer) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
+    
     if (device->type && device->type->ops.load_state) {
-        return device->type->ops.load_state(device, buffer, size);
+        /* 临时解锁以避免在回调中发生死锁 */
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
+        
+        int load_ret = device->type->ops.load_state(device, buffer, size);
+        
+        ret = pthread_mutex_lock(&device_mutex);
+        if (ret != 0) {
+            /* 锁获取失败，但加载状态操作已完成 */
+            return load_ret; /* 返回加载结果 */
+        }
+        
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
+        
+        return load_ret;
+    }
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
     }
     
     return PHYMUTI_ERROR_NOT_SUPPORTED;
@@ -411,12 +700,43 @@ int device_load_state(device_handle_t device, const void *buffer, size_t size) {
  * @return int 成功返回0，失败返回错误码
  */
 int device_ioctl(device_handle_t device, int cmd, void *arg) {
+    int ret;
+    
     if (!device) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
+    
     if (device->type && device->type->ops.ioctl) {
-        return device->type->ops.ioctl(device, cmd, arg);
+        /* 临时解锁以避免在回调中发生死锁 */
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
+        
+        int ioctl_ret = device->type->ops.ioctl(device, cmd, arg);
+        
+        ret = pthread_mutex_lock(&device_mutex);
+        if (ret != 0) {
+            /* 锁获取失败，但ioctl操作已完成 */
+            return ioctl_ret; /* 返回ioctl结果 */
+        }
+        
+        ret = pthread_mutex_unlock(&device_mutex);
+        if (ret != 0) {
+            return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+        }
+        
+        return ioctl_ret;
+    }
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
     }
     
     return PHYMUTI_ERROR_NOT_SUPPORTED;
@@ -429,7 +749,26 @@ int device_ioctl(device_handle_t device, int cmd, void *arg) {
  * @return const char* 设备名称
  */
 const char* device_get_name(device_handle_t device) {
-    return device ? device->name : NULL;
+    int ret;
+    const char *name;
+    
+    if (!device) {
+        return NULL;
+    }
+    
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return NULL;
+    }
+    
+    name = device->name;
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，记录错误或日志 */
+    }
+    
+    return name;
 }
 
 /**
@@ -439,7 +778,26 @@ const char* device_get_name(device_handle_t device) {
  * @return const char* 设备类型名称
  */
 const char* device_get_type_name(device_handle_t device) {
-    return (device && device->type) ? device->type->name : NULL;
+    int ret;
+    const char *type_name;
+    
+    if (!device || !device->type) {
+        return NULL;
+    }
+    
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return NULL;
+    }
+    
+    type_name = device->type->name;
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，记录错误或日志 */
+    }
+    
+    return type_name;
 }
 
 /**
@@ -449,7 +807,26 @@ const char* device_get_type_name(device_handle_t device) {
  * @return void* 用户数据指针
  */
 void* device_get_user_data(device_handle_t device) {
-    return device ? device->user_data : NULL;
+    int ret;
+    void *user_data;
+    
+    if (!device) {
+        return NULL;
+    }
+    
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return NULL;
+    }
+    
+    user_data = device->user_data;
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，记录错误或日志 */
+    }
+    
+    return user_data;
 }
 
 /**
@@ -460,10 +837,23 @@ void* device_get_user_data(device_handle_t device) {
  * @return int 成功返回0，失败返回错误码
  */
 int device_set_user_data(device_handle_t device, void *user_data) {
+    int ret;
+    
     if (!device) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
+    ret = pthread_mutex_lock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
+    
     device->user_data = user_data;
+    
+    ret = pthread_mutex_unlock(&device_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
+    
     return PHYMUTI_SUCCESS;
 } 

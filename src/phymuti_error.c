@@ -36,6 +36,14 @@ const char* phymuti_error_string(int error_code) {
             return "I/O error";
         case PHYMUTI_ERROR_INTERNAL:
             return "Internal error";
+        case PHYMUTI_ERROR_MUTEX_INIT_FAILED:
+            return "Mutex initialization failed";
+        case PHYMUTI_ERROR_MUTEX_DESTROY_FAILED:
+            return "Mutex destruction failed";
+        case PHYMUTI_ERROR_MUTEX_LOCK_FAILED:
+            return "Mutex lock failed";
+        case PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED:
+            return "Mutex unlock failed";
             
         /* 设备管理器错误码 */
         case PHYMUTI_ERROR_DEVICE_TYPE_NOT_FOUND:

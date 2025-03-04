@@ -37,6 +37,9 @@ int memory_manager_init(void) {
     /* 初始化内存区域链表 */
     memory_region_list = NULL;
     
+    /* 初始化互斥锁只需要在此处检查是否成功，因为是静态初始化，
+       如果系统初始化后正常，这里不会返回错误，确保用于同步的操作正确 */
+    
     return PHYMUTI_SUCCESS;
 }
 
@@ -46,8 +49,14 @@ int memory_manager_init(void) {
  * @return int 成功返回0，失败返回错误码
  */
 int memory_manager_cleanup(void) {
+    int ret;
+    
     /* 清理所有内存区域 */
-    pthread_mutex_lock(&memory_region_mutex);
+    ret = pthread_mutex_lock(&memory_region_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
+    
     memory_region_t *region = memory_region_list;
     memory_region_t *next_region;
     
@@ -71,7 +80,11 @@ int memory_manager_cleanup(void) {
     }
     
     memory_region_list = NULL;
-    pthread_mutex_unlock(&memory_region_mutex);
+    
+    ret = pthread_mutex_unlock(&memory_region_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
     
     return PHYMUTI_SUCCESS;
 }
@@ -89,6 +102,7 @@ int memory_manager_cleanup(void) {
 memory_region_t* memory_region_create(device_handle_t device, const char *name, 
                                       uint64_t base_addr, size_t size, uint32_t flags) {
     memory_region_t *region;
+    int ret;
     
     /* 检查参数 */
     if (!name || size == 0) {
@@ -122,10 +136,24 @@ memory_region_t* memory_region_create(device_handle_t device, const char *name,
     }
     
     /* 添加到内存区域链表 */
-    pthread_mutex_lock(&memory_region_mutex);
+    ret = pthread_mutex_lock(&memory_region_mutex);
+    if (ret != 0) {
+        /* 锁操作失败，需要清理已分配的资源 */
+        free(region->data);
+        free(region->name);
+        free(region);
+        return NULL;
+    }
+    
     region->next = memory_region_list;
     memory_region_list = region;
-    pthread_mutex_unlock(&memory_region_mutex);
+    
+    ret = pthread_mutex_unlock(&memory_region_mutex);
+    if (ret != 0) {
+        /* 解锁失败，但内存区域已经添加到链表中，
+           记录错误但继续返回创建的区域对象 */
+        /* 在实际应用中可以考虑记录错误日志 */
+    }
     
     return region;
 }
@@ -138,6 +166,7 @@ memory_region_t* memory_region_create(device_handle_t device, const char *name,
  */
 int memory_region_destroy(memory_region_t *region) {
     memory_region_t *prev, *curr;
+    int ret;
     
     /* 检查参数 */
     if (!region) {
@@ -145,7 +174,10 @@ int memory_region_destroy(memory_region_t *region) {
     }
     
     /* 从内存区域链表中移除 */
-    pthread_mutex_lock(&memory_region_mutex);
+    ret = pthread_mutex_lock(&memory_region_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_LOCK_FAILED;
+    }
     
     prev = NULL;
     curr = memory_region_list;
@@ -171,7 +203,11 @@ int memory_region_destroy(memory_region_t *region) {
             /* 释放内存区域结构体 */
             free(region);
             
-            pthread_mutex_unlock(&memory_region_mutex);
+            ret = pthread_mutex_unlock(&memory_region_mutex);
+            if (ret != 0) {
+                return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+            }
+            
             return PHYMUTI_SUCCESS;
         }
         
@@ -179,7 +215,11 @@ int memory_region_destroy(memory_region_t *region) {
         curr = curr->next;
     }
     
-    pthread_mutex_unlock(&memory_region_mutex);
+    ret = pthread_mutex_unlock(&memory_region_mutex);
+    if (ret != 0) {
+        return PHYMUTI_ERROR_MUTEX_UNLOCK_FAILED;
+    }
+    
     return PHYMUTI_ERROR_NOT_FOUND;
 }
 
@@ -192,6 +232,7 @@ int memory_region_destroy(memory_region_t *region) {
  */
 memory_region_t* memory_region_find(device_handle_t device, const char *name) {
     memory_region_t *region;
+    int ret;
     
     /* 检查参数 */
     if (!name) {
@@ -199,20 +240,33 @@ memory_region_t* memory_region_find(device_handle_t device, const char *name) {
     }
     
     /* 遍历内存区域链表 */
-    pthread_mutex_lock(&memory_region_mutex);
+    ret = pthread_mutex_lock(&memory_region_mutex);
+    if (ret != 0) {
+        /* 锁获取失败，无法访问共享数据 */
+        return NULL;
+    }
     
     region = memory_region_list;
     while (region) {
         if ((!device || region->device == device) && 
             strcmp(region->name, name) == 0) {
-            pthread_mutex_unlock(&memory_region_mutex);
+            ret = pthread_mutex_unlock(&memory_region_mutex);
+            if (ret != 0) {
+                /* 锁释放失败，但已找到结果 */
+                /* 在实际应用中可以考虑记录错误日志 */
+            }
             return region;
         }
         
         region = region->next;
     }
     
-    pthread_mutex_unlock(&memory_region_mutex);
+    ret = pthread_mutex_unlock(&memory_region_mutex);
+    if (ret != 0) {
+        /* 锁释放失败，记录错误但返回查找结果 */
+        /* 在实际应用中可以考虑记录错误日志 */
+    }
+    
     return NULL;
 }
 
