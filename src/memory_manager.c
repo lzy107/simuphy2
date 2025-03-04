@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* 内存区域结构体 */
 struct memory_region_struct {
@@ -23,6 +24,9 @@ struct memory_region_struct {
 
 /* 内存区域链表头 */
 static memory_region_t *memory_region_list = NULL;
+
+/* 内存区域链表的互斥锁 */
+static pthread_mutex_t memory_region_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
  * @brief 初始化内存管理器
@@ -43,16 +47,31 @@ int memory_manager_init(void) {
  */
 int memory_manager_cleanup(void) {
     /* 清理所有内存区域 */
+    pthread_mutex_lock(&memory_region_mutex);
     memory_region_t *region = memory_region_list;
     memory_region_t *next_region;
     
     while (region) {
         next_region = region->next;
-        memory_region_destroy(region);
+        
+        /* 释放内存区域数据 */
+        if (region->data) {
+            free(region->data);
+        }
+        
+        /* 释放名称 */
+        if (region->name) {
+            free(region->name);
+        }
+        
+        /* 释放内存区域结构体 */
+        free(region);
+        
         region = next_region;
     }
     
     memory_region_list = NULL;
+    pthread_mutex_unlock(&memory_region_mutex);
     
     return PHYMUTI_SUCCESS;
 }
@@ -60,7 +79,7 @@ int memory_manager_cleanup(void) {
 /**
  * @brief 创建内存区域
  * 
- * @param device 关联的设备句柄
+ * @param device 关联的设备
  * @param name 内存区域名称
  * @param base_addr 基地址
  * @param size 大小（字节）
@@ -68,35 +87,23 @@ int memory_manager_cleanup(void) {
  * @return memory_region_t* 成功返回内存区域指针，失败返回NULL
  */
 memory_region_t* memory_region_create(device_handle_t device, const char *name, 
-                                     uint64_t base_addr, size_t size, uint32_t flags) {
-    if (!device || !name || size == 0) {
+                                      uint64_t base_addr, size_t size, uint32_t flags) {
+    memory_region_t *region;
+    
+    /* 检查参数 */
+    if (!name || size == 0) {
         return NULL;
     }
     
-    /* 检查内存区域是否已存在 */
-    memory_region_t *region = memory_region_list;
-    while (region) {
-        if (region->device == device && strcmp(region->name, name) == 0) {
-            return NULL;  /* 内存区域已存在 */
-        }
-        region = region->next;
-    }
-    
-    /* 创建新的内存区域 */
+    /* 分配内存区域结构体 */
     region = (memory_region_t *)malloc(sizeof(memory_region_t));
     if (!region) {
         return NULL;
     }
     
+    /* 初始化内存区域结构体 */
     region->name = strdup(name);
     if (!region->name) {
-        free(region);
-        return NULL;
-    }
-    
-    region->data = (uint8_t *)calloc(size, 1);
-    if (!region->data) {
-        free(region->name);
         free(region);
         return NULL;
     }
@@ -106,9 +113,19 @@ memory_region_t* memory_region_create(device_handle_t device, const char *name,
     region->size = size;
     region->flags = flags;
     
+    /* 分配内存数据 */
+    region->data = (uint8_t *)calloc(size, 1);
+    if (!region->data) {
+        free(region->name);
+        free(region);
+        return NULL;
+    }
+    
     /* 添加到内存区域链表 */
+    pthread_mutex_lock(&memory_region_mutex);
     region->next = memory_region_list;
     memory_region_list = region;
+    pthread_mutex_unlock(&memory_region_mutex);
     
     return region;
 }
@@ -120,13 +137,18 @@ memory_region_t* memory_region_create(device_handle_t device, const char *name,
  * @return int 成功返回0，失败返回错误码
  */
 int memory_region_destroy(memory_region_t *region) {
+    memory_region_t *prev, *curr;
+    
+    /* 检查参数 */
     if (!region) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
-    /* 从链表中移除 */
-    memory_region_t *prev = NULL;
-    memory_region_t *curr = memory_region_list;
+    /* 从内存区域链表中移除 */
+    pthread_mutex_lock(&memory_region_mutex);
+    
+    prev = NULL;
+    curr = memory_region_list;
     
     while (curr) {
         if (curr == region) {
@@ -136,11 +158,20 @@ int memory_region_destroy(memory_region_t *region) {
                 memory_region_list = curr->next;
             }
             
-            /* 释放资源 */
-            free(region->name);
-            free(region->data);
+            /* 释放内存区域数据 */
+            if (region->data) {
+                free(region->data);
+            }
+            
+            /* 释放名称 */
+            if (region->name) {
+                free(region->name);
+            }
+            
+            /* 释放内存区域结构体 */
             free(region);
             
+            pthread_mutex_unlock(&memory_region_mutex);
             return PHYMUTI_SUCCESS;
         }
         
@@ -148,30 +179,40 @@ int memory_region_destroy(memory_region_t *region) {
         curr = curr->next;
     }
     
-    return PHYMUTI_ERROR_MEMORY_REGION_NOT_FOUND;
+    pthread_mutex_unlock(&memory_region_mutex);
+    return PHYMUTI_ERROR_NOT_FOUND;
 }
 
 /**
- * @brief 查找内存区域
+ * @brief 通过名称查找内存区域
  * 
- * @param device 设备句柄
+ * @param device 关联的设备（可选，如果为NULL则不匹配设备）
  * @param name 内存区域名称
  * @return memory_region_t* 成功返回内存区域指针，失败返回NULL
  */
 memory_region_t* memory_region_find(device_handle_t device, const char *name) {
-    if (!device || !name) {
+    memory_region_t *region;
+    
+    /* 检查参数 */
+    if (!name) {
         return NULL;
     }
     
-    memory_region_t *region = memory_region_list;
+    /* 遍历内存区域链表 */
+    pthread_mutex_lock(&memory_region_mutex);
     
+    region = memory_region_list;
     while (region) {
-        if (region->device == device && strcmp(region->name, name) == 0) {
+        if ((!device || region->device == device) && 
+            strcmp(region->name, name) == 0) {
+            pthread_mutex_unlock(&memory_region_mutex);
             return region;
         }
+        
         region = region->next;
     }
     
+    pthread_mutex_unlock(&memory_region_mutex);
     return NULL;
 }
 

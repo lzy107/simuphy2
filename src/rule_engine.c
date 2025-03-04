@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* 规则结构体 */
 typedef struct rule_struct {
@@ -29,6 +30,9 @@ static rule_t *rule_list = NULL;
 /* 下一个可用的规则ID */
 static rule_id_t next_rule_id = 1;
 
+/* 规则链表的互斥锁 */
+static pthread_mutex_t rule_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /**
  * @brief 初始化规则引擎
  * 
@@ -49,45 +53,60 @@ int rule_engine_init(void) {
  */
 int rule_engine_cleanup(void) {
     /* 清理所有规则 */
+    pthread_mutex_lock(&rule_mutex);
+    
     rule_t *rule = rule_list;
     rule_t *next_rule;
     
     while (rule) {
         next_rule = rule->next;
         
-        /* 释放资源 */
+        /* 释放规则资源 */
         if (rule->name) {
             free(rule->name);
         }
+        
         if (rule->action_ids) {
             free(rule->action_ids);
         }
+        
+        /* 释放规则结构体 */
         free(rule);
         
         rule = next_rule;
     }
     
     rule_list = NULL;
+    next_rule_id = 1;
+    
+    pthread_mutex_unlock(&rule_mutex);
     
     return PHYMUTI_SUCCESS;
 }
 
 /**
- * @brief 查找规则
+ * @brief 根据ID查找规则
  * 
  * @param id 规则ID
  * @return rule_t* 成功返回规则指针，失败返回NULL
  */
 static rule_t* find_rule_by_id(rule_id_t id) {
-    rule_t *rule = rule_list;
+    rule_t *rule;
     
+    /* 遍历规则链表 */
+    pthread_mutex_lock(&rule_mutex);
+    
+    rule = rule_list;
     while (rule) {
         if (rule->id == id) {
+            pthread_mutex_unlock(&rule_mutex);
             return rule;
         }
+        
         rule = rule->next;
     }
     
+    pthread_mutex_unlock(&rule_mutex);
     return NULL;
 }
 

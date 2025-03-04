@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* 设备类型结构体 */
 typedef struct device_type_struct {
@@ -31,6 +32,9 @@ static device_type_t *device_type_list = NULL;
 /* 设备链表头 */
 static device_handle_t device_list = NULL;
 
+/* 设备和设备类型链表的互斥锁 */
+static pthread_mutex_t device_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /**
  * @brief 初始化设备管理器
  * 
@@ -50,29 +54,47 @@ int device_manager_init(void) {
  * @return int 成功返回0，失败返回错误码
  */
 int device_manager_cleanup(void) {
-    /* 清理所有设备 */
-    device_handle_t device = device_list;
-    device_handle_t next_device;
+    device_type_t *type, *next_type;
+    device_handle_t device, next_device;
     
+    /* 清理所有设备 */
+    pthread_mutex_lock(&device_mutex);
+    
+    device = device_list;
     while (device) {
         next_device = device->next;
-        device_destroy(device);
+        
+        /* 释放设备名称 */
+        if (device->name) {
+            free(device->name);
+        }
+        
+        /* 释放设备结构体 */
+        free(device);
+        
         device = next_device;
     }
     
     /* 清理所有设备类型 */
-    device_type_t *type = device_type_list;
-    device_type_t *next_type;
-    
+    type = device_type_list;
     while (type) {
         next_type = type->next;
-        free(type->name);
+        
+        /* 释放设备类型名称 */
+        if (type->name) {
+            free(type->name);
+        }
+        
+        /* 释放设备类型结构体 */
         free(type);
+        
         type = next_type;
     }
     
-    device_type_list = NULL;
     device_list = NULL;
+    device_type_list = NULL;
+    
+    pthread_mutex_unlock(&device_mutex);
     
     return PHYMUTI_SUCCESS;
 }
@@ -86,14 +108,20 @@ int device_manager_cleanup(void) {
  * @return int 成功返回0，失败返回错误码
  */
 int device_type_register(const char *type_name, const device_ops_t *ops, void *user_data) {
+    device_type_t *type;
+    
+    /* 检查参数 */
     if (!type_name || !ops) {
         return PHYMUTI_ERROR_INVALID_PARAM;
     }
     
-    /* 检查设备类型是否已存在 */
-    device_type_t *type = device_type_list;
+    /* 检查是否已注册 */
+    pthread_mutex_lock(&device_mutex);
+    
+    type = device_type_list;
     while (type) {
         if (strcmp(type->name, type_name) == 0) {
+            pthread_mutex_unlock(&device_mutex);
             return PHYMUTI_ERROR_ALREADY_EXISTS;
         }
         type = type->next;
@@ -102,21 +130,25 @@ int device_type_register(const char *type_name, const device_ops_t *ops, void *u
     /* 创建新的设备类型 */
     type = (device_type_t *)malloc(sizeof(device_type_t));
     if (!type) {
+        pthread_mutex_unlock(&device_mutex);
         return PHYMUTI_ERROR_OUT_OF_MEMORY;
     }
     
     type->name = strdup(type_name);
     if (!type->name) {
         free(type);
+        pthread_mutex_unlock(&device_mutex);
         return PHYMUTI_ERROR_OUT_OF_MEMORY;
     }
     
-    memcpy(&type->ops, ops, sizeof(device_ops_t));
+    type->ops = *ops;
     type->user_data = user_data;
     
     /* 添加到设备类型链表 */
     type->next = device_type_list;
     device_type_list = type;
+    
+    pthread_mutex_unlock(&device_mutex);
     
     return PHYMUTI_SUCCESS;
 }

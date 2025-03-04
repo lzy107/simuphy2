@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 
 /* 动作结构体 */
 typedef struct action_struct {
@@ -35,6 +36,9 @@ static action_t *action_list = NULL;
 /* 下一个可用的动作ID */
 static action_id_t next_action_id = 1;
 
+/* 动作链表的互斥锁 */
+static pthread_mutex_t action_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /**
  * @brief 初始化动作管理器
  * 
@@ -55,80 +59,88 @@ int action_manager_init(void) {
  */
 int action_manager_cleanup(void) {
     /* 清理所有动作 */
+    pthread_mutex_lock(&action_mutex);
+    
     action_t *action = action_list;
     action_t *next_action;
     
     while (action) {
         next_action = action->next;
         
-        /* 根据类型释放资源 */
-        switch (action->type) {
-            case ACTION_TYPE_SCRIPT:
-                if (action->data.script_data.path) {
-                    free(action->data.script_data.path);
-                }
-                break;
-                
-            case ACTION_TYPE_COMMAND:
-                if (action->data.command_data.command) {
-                    free(action->data.command_data.command);
-                }
-                break;
-                
-            default:
-                break;
+        /* 根据动作类型释放资源 */
+        if (action->type == ACTION_TYPE_SCRIPT) {
+            free(action->data.script_data.path);
+        } else if (action->type == ACTION_TYPE_COMMAND) {
+            free(action->data.command_data.command);
         }
         
-        /* 释放动作 */
+        /* 释放动作结构体 */
         free(action);
         
         action = next_action;
     }
     
     action_list = NULL;
+    next_action_id = 1;
+    
+    pthread_mutex_unlock(&action_mutex);
     
     return PHYMUTI_SUCCESS;
 }
 
 /**
- * @brief 查找动作
+ * @brief 根据ID查找动作
  * 
  * @param id 动作ID
  * @return action_t* 成功返回动作指针，失败返回NULL
  */
 static action_t* find_action(action_id_t id) {
-    action_t *action = action_list;
+    action_t *action;
     
+    /* 遍历动作链表 */
+    pthread_mutex_lock(&action_mutex);
+    
+    action = action_list;
     while (action) {
         if (action->id == id) {
+            pthread_mutex_unlock(&action_mutex);
             return action;
         }
+        
         action = action->next;
     }
     
+    pthread_mutex_unlock(&action_mutex);
     return NULL;
 }
 
 /**
- * @brief 创建回调函数动作
+ * @brief 创建回调函数类型的动作
  * 
  * @param callback 回调函数
  * @param user_data 用户数据
- * @return action_id_t 成功返回动作ID，失败返回ACTION_INVALID_ID
+ * @return action_id_t 成功返回动作ID，失败返回0
  */
 action_id_t action_create_callback(action_callback_t callback, void *user_data) {
+    action_t *action;
+    action_id_t id;
+    
+    /* 检查参数 */
     if (!callback) {
-        return ACTION_INVALID_ID;
+        return 0;
     }
     
-    /* 创建新的动作 */
-    action_t *action = (action_t *)malloc(sizeof(action_t));
+    /* 创建动作 */
+    action = (action_t *)malloc(sizeof(action_t));
     if (!action) {
-        return ACTION_INVALID_ID;
+        return 0;
     }
     
     /* 初始化动作 */
-    action->id = next_action_id++;
+    pthread_mutex_lock(&action_mutex);
+    
+    id = next_action_id++;
+    action->id = id;
     action->type = ACTION_TYPE_CALLBACK;
     action->data.callback_data.callback = callback;
     action->user_data = user_data;
@@ -137,7 +149,9 @@ action_id_t action_create_callback(action_callback_t callback, void *user_data) 
     action->next = action_list;
     action_list = action;
     
-    return action->id;
+    pthread_mutex_unlock(&action_mutex);
+    
+    return id;
 }
 
 /**

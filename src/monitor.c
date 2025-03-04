@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* 监视点结构体 */
 typedef struct watchpoint_struct {
@@ -31,6 +32,9 @@ static watchpoint_t *watchpoint_list = NULL;
 /* 下一个可用的监视点ID */
 static monitor_id_t next_watchpoint_id = 1;
 
+/* 监视点链表的互斥锁 */
+static pthread_mutex_t watchpoint_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /**
  * @brief 初始化监视器
  * 
@@ -51,6 +55,8 @@ int monitor_init(void) {
  */
 int monitor_cleanup(void) {
     /* 清理所有监视点 */
+    pthread_mutex_lock(&watchpoint_mutex);
+    
     watchpoint_t *wp = watchpoint_list;
     watchpoint_t *next_wp;
     
@@ -62,13 +68,16 @@ int monitor_cleanup(void) {
             free(wp->action_ids);
         }
         
-        /* 释放监视点 */
+        /* 释放监视点结构体 */
         free(wp);
         
         wp = next_wp;
     }
     
     watchpoint_list = NULL;
+    next_watchpoint_id = 1;
+    
+    pthread_mutex_unlock(&watchpoint_mutex);
     
     return PHYMUTI_SUCCESS;
 }
@@ -80,15 +89,22 @@ int monitor_cleanup(void) {
  * @return watchpoint_t* 成功返回监视点指针，失败返回NULL
  */
 static watchpoint_t* find_watchpoint(monitor_id_t id) {
-    watchpoint_t *wp = watchpoint_list;
+    watchpoint_t *wp;
     
+    /* 遍历监视点链表 */
+    pthread_mutex_lock(&watchpoint_mutex);
+    
+    wp = watchpoint_list;
     while (wp) {
         if (wp->id == id) {
+            pthread_mutex_unlock(&watchpoint_mutex);
             return wp;
         }
+        
         wp = wp->next;
     }
     
+    pthread_mutex_unlock(&watchpoint_mutex);
     return NULL;
 }
 
@@ -97,33 +113,38 @@ static watchpoint_t* find_watchpoint(monitor_id_t id) {
  * 
  * @param region 内存区域
  * @param addr 地址
- * @param size 大小（字节）
- * @param type 监视点类型
- * @param wpvalue 要监视的值（仅当type为WATCHPOINT_VALUE_WRITE时使用）
- * @return monitor_id_t 成功返回监视点ID，失败返回MONITOR_INVALID_ID
+ * @param size 大小
+ * @param type 类型
+ * @param wpvalue 要监视的值
+ * @return monitor_id_t 成功返回监视点ID，失败返回0
  */
 monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr, 
                                    uint32_t size, watchpoint_type_t type, uint64_t wpvalue) {
-    if (!region || size == 0 || 
-        (type != WATCHPOINT_READ && type != WATCHPOINT_WRITE && 
-         type != WATCHPOINT_ACCESS && type != WATCHPOINT_VALUE_WRITE)) {
-        return MONITOR_INVALID_ID;
+    watchpoint_t *wp;
+    monitor_id_t id;
+    
+    /* 检查参数 */
+    if (!region || size == 0 || size > 8) {
+        return 0;
     }
     
-    /* 创建新的监视点 */
-    watchpoint_t *wp = (watchpoint_t *)malloc(sizeof(watchpoint_t));
+    /* 创建监视点 */
+    wp = (watchpoint_t *)malloc(sizeof(watchpoint_t));
     if (!wp) {
-        return MONITOR_INVALID_ID;
+        return 0;
     }
     
     /* 初始化监视点 */
-    wp->id = next_watchpoint_id++;
+    pthread_mutex_lock(&watchpoint_mutex);
+    
+    id = next_watchpoint_id++;
+    wp->id = id;
     wp->region = region;
     wp->addr = addr;
     wp->size = size;
     wp->type = type;
     wp->enabled = true;
-    wp->wpvalue = wpvalue;  /* 设置要监视的值 */
+    wp->wpvalue = wpvalue;
     wp->action_ids = NULL;
     wp->action_count = 0;
     wp->action_capacity = 0;
@@ -132,7 +153,9 @@ monitor_id_t monitor_add_watchpoint(memory_region_t *region, uint64_t addr,
     wp->next = watchpoint_list;
     watchpoint_list = wp;
     
-    return wp->id;
+    pthread_mutex_unlock(&watchpoint_mutex);
+    
+    return id;
 }
 
 /**
